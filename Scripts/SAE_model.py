@@ -30,7 +30,13 @@ class StackedAutoencoder(nn.Module):
         # Decoder
         decoder_layers = []
         reversed_layer_sizes = list(reversed(layer_sizes[:-1])) + [input_size]
-        for idx, (size, activation_fn, dropout_rate) in enumerate(zip(reversed_layer_sizes, reversed(activation_functions[:-1] + [nn.Sigmoid()])), reversed(dropout_rates[:-1] + [0.0])):
+        for idx, (size, activation_fn, dropout_rate) in enumerate(
+            zip(
+                reversed_layer_sizes,
+                reversed(activation_functions[:-1] + [nn.Sigmoid()]),
+                reversed(dropout_rates[:-1] + [0.0])
+            )
+        ):
             decoder_layers.append(nn.Linear(prev_size, size))
             if activation_fn:
                 decoder_layers.append(activation_fn)
