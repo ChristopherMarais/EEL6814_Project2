@@ -32,7 +32,7 @@ SAE_PARAMS = {
 }
 
 MLP_PARAMS = {
-    "layer_sizes": [1200, 400],
+    "layer_sizes": [256, 128],
     "dropout_rates": [0.5, 0.5],
     "learning_rate": 1e-3,
     "batch_size": 128,
@@ -41,7 +41,6 @@ MLP_PARAMS = {
     "early_stopping_delta": 1e-4,
 }
 
-bottleneck_size = 120
 num_classes = 10
 input_size = 784
 
@@ -71,8 +70,8 @@ def generate_direct_targets(num_classes, dimensions):
     targets = np.eye(num_classes, dimensions)
     return torch.tensor(targets, dtype=torch.float32).to(device)
 
-hypersphere_targets = generate_hypersphere_targets(num_classes, bottleneck_size)
-direct_targets = generate_direct_targets(num_classes, bottleneck_size)
+hypersphere_targets = generate_hypersphere_targets(num_classes, 120)
+direct_targets = generate_direct_targets(num_classes, 10)
 
 # SAE model
 class SAE(nn.Module):
@@ -114,7 +113,7 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg):
             optimizer.zero_grad()
             latent, reconstructed = sae_model(batch_data)
             mse_loss = nn.MSELoss()(reconstructed, batch_data)
-            reg_penalty = torch.mean(torch.norm(latent - targets[batch_labels], dim=1) ** 2)
+            reg_penalty = torch.mean(torch.norm(latent - targets[batch_labels], dim=1))
             loss = mse_loss + lambda_reg * reg_penalty
             loss.backward()
             optimizer.step()
@@ -137,19 +136,17 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg):
                 batch_data, batch_labels = batch_data.to(device), batch_labels.to(device)
                 latent, reconstructed = sae_model(batch_data)
                 mse_loss = nn.MSELoss()(reconstructed, batch_data)
-                reg_penalty = torch.mean(torch.norm(latent - targets[batch_labels], dim=1) ** 2)
+                reg_penalty = torch.mean(torch.norm(latent - targets[batch_labels], dim=1))
                 loss = mse_loss + lambda_reg * reg_penalty
 
                 val_loss += loss.item()
                 val_total += batch_labels.size(0)
-                val_correct += (torch.argmax(latent, dim=1) == batch_labels).sum().item()
 
         val_loss /= len(val_loader)
-        val_acc = val_correct / val_total
 
         print(f"Epoch {epoch+1}/{params['num_epochs']} - "
-              f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Penalty: {penalty:.4f}, "
-              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+              f"Train Loss: {train_loss:.4f}, Penalty: {penalty:.4f}, "
+              f"Val Loss: {val_loss:.4f}")
 
         # Early stopping
         if val_loss < best_val_loss - params["early_stopping_delta"]:
@@ -283,7 +280,7 @@ def train_and_evaluate_classifier(latent_train, labels_train, latent_val, labels
 
 # Main script
 print("Training SAE with Hypersphere Targets...")
-sae_model_hyper = SAE(input_size, bottleneck_size, SAE_PARAMS).to(device)
+sae_model_hyper = SAE(input_size, 120, SAE_PARAMS).to(device)
 train_sae(sae_model_hyper, train_loader, val_loader, hypersphere_targets, SAE_PARAMS, lambda_reg=0.06)
 
 latent_train_hyper, labels_train_hyper = extract_latent_representations(sae_model_hyper, train_loader)
@@ -294,7 +291,7 @@ print("Training and Evaluating MLP on Hypersphere Latent Representations...")
 train_and_evaluate_classifier(latent_train_hyper, labels_train_hyper, latent_val_hyper, labels_val_hyper, latent_test_hyper, labels_test_hyper, MLP_PARAMS)
 
 print("Training SAE with Direct Targets...")
-sae_model_direct = SAE(input_size, bottleneck_size, SAE_PARAMS).to(device)
+sae_model_direct = SAE(input_size, 10, SAE_PARAMS).to(device)
 train_sae(sae_model_direct, train_loader, val_loader, direct_targets, SAE_PARAMS, lambda_reg=0.06)
 
 latent_train_direct, labels_train_direct = extract_latent_representations(sae_model_direct, train_loader)
