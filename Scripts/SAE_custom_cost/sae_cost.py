@@ -32,8 +32,8 @@ SAE_PARAMS = {
 }
 
 MLP_PARAMS = {
-    "layer_sizes": [1200, 400],
-    "dropout_rates": [0.5, 0.5],
+    "layer_sizes": [100],
+    "dropout_rates": [0.3],
     "learning_rate": 1e-4,
     "batch_size": 128,
     "num_epochs": 200,
