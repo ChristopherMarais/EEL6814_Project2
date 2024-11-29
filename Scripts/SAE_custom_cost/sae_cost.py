@@ -32,7 +32,7 @@ SAE_PARAMS = {
 }
 
 MLP_PARAMS = {
-    "layer_sizes": [64, 32],
+    "layer_sizes": [1200, 400],
     "dropout_rates": [0.5, 0.5],
     "learning_rate": 1e-4,
     "batch_size": 128,
@@ -61,16 +61,22 @@ val_loader = get_data_loader(val_dataset, SAE_PARAMS["batch_size"], shuffle=Fals
 test_loader = get_data_loader(test_dataset, SAE_PARAMS["batch_size"], shuffle=False)
 
 # Generate targets
-def generate_hypersphere_targets(num_classes, dimensions):
-    random_vectors = np.random.randn(num_classes, dimensions)
+def generate_hypersphere_targets(num_classes, bottleneck_size):
+    random_vectors = np.random.randn(num_classes, bottleneck_size)
     targets = random_vectors / np.linalg.norm(random_vectors, axis=1, keepdims=True)
     return torch.tensor(targets, dtype=torch.float32).to(device)
 
-def generate_direct_targets(num_classes, dimensions):
-    targets = np.eye(num_classes, dimensions)
+def generate_diagonal_targets(num_classes, bottleneck_size):
+    targets = np.zeros((num_classes, bottleneck_size))
+    np.fill_diagonal(targets[:, :num_classes], 1)
+    return torch.tensor(targets, dtype=torch.float32).to(device)
+
+def generate_direct_targets(num_classes, bottleneck_size):
+    targets = np.eye(num_classes, bottleneck_size)
     return torch.tensor(targets, dtype=torch.float32).to(device)
 
 hypersphere_targets = generate_hypersphere_targets(num_classes, 120)
+diagonal_targets = generate_diagonal_targets(num_classes, 120)
 direct_targets = generate_direct_targets(num_classes, 10)
 
 # SAE model
@@ -99,9 +105,16 @@ class SAE(nn.Module):
 
 # SAE training
 def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg):
-    optimizer = optim.Adam(sae_model.parameters(), lr=params["learning_rate"])
+    optimizer = optim.AdamW(sae_model.parameters(), lr=params["learning_rate"], weight_decay=0.1)
     best_val_loss = float("inf")
     early_stop_counter = 0
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.15,
+        patience=3,
+        threshold=1e-4
+    )
 
     for epoch in range(params["num_epochs"]):
         # Training
@@ -140,6 +153,9 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg):
 
         val_loss /= len(val_loader)
 
+        # Update the scheduler
+        scheduler.step(val_loss)
+
         print(f"Epoch {epoch+1}/{params['num_epochs']} - Train Loss: {train_loss:.4f}, Penalty: {penalty:.4f}, Val Loss: {val_loss:.4f}")
 
         # Early stopping
@@ -165,12 +181,15 @@ def extract_latent_representations(sae_model, data_loader):
             labels.append(batch_labels.cpu())
     return torch.cat(latent_representations), torch.cat(labels)
 
+
 class SAEClassifier(nn.Module):
-    def __init__(self, encoder, input_size, encoder_output_size, classifier_hidden_sizes, num_classes, leaky_relu_negative_slope=0.01, batch_norm=True):
+    def __init__(self, encoder, input_size, encoder_output_size, classifier_hidden_sizes, num_classes,
+                 leaky_relu_negative_slope=0.01, batch_norm=True, dropout_rate=0.5):
         super(SAEClassifier, self).__init__()
         self.encoder = encoder  # Pre-trained encoder, frozen
         for param in self.encoder.parameters():
             param.requires_grad = False  # Freeze encoder weights
+
         layers = []
         prev_size = encoder_output_size
         for hidden_size in classifier_hidden_sizes:
@@ -178,7 +197,9 @@ class SAEClassifier(nn.Module):
             if batch_norm:
                 layers.append(nn.BatchNorm1d(hidden_size))
             layers.append(nn.LeakyReLU(negative_slope=leaky_relu_negative_slope))
+            layers.append(nn.Dropout(dropout_rate))  # Add dropout layer
             prev_size = hidden_size
+
         layers.append(nn.Linear(prev_size, num_classes))
         self.classifier = nn.Sequential(*layers)
 
@@ -186,6 +207,7 @@ class SAEClassifier(nn.Module):
         x = self.encoder(x)  # Pass through the encoder to create latent space
         x = self.classifier(x)  # Pass latent space through the classifier head
         return x
+
 
 def train_and_evaluate_classifier(train_loader, val_loader, test_loader, params, encoder, input_size, encoder_output_size):
     classifier = SAEClassifier(
@@ -198,8 +220,13 @@ def train_and_evaluate_classifier(train_loader, val_loader, test_loader, params,
         batch_norm=True
     ).to(device)
 
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, classifier.parameters()), lr=params["learning_rate"])
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, classifier.parameters()), lr=params["learning_rate"], weight_decay=0.3)
     criterion = nn.CrossEntropyLoss()
+
+    # Learning Rate Scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.1, patience=3, threshold=1e-4
+    )
 
     best_val_loss = float("inf")
     early_stop_counter = 0
@@ -240,7 +267,11 @@ def train_and_evaluate_classifier(train_loader, val_loader, test_loader, params,
         val_loss /= len(val_loader)
         val_acc = val_correct / val_total
 
-        print(f"Epoch {epoch+1}/{params['num_epochs']} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        # Step scheduler
+        scheduler.step(val_loss)
+
+        print(f"Epoch {epoch+1}/{params['num_epochs']} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+              f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, LR: {optimizer.param_groups[0]['lr']:.1e}")
 
         if val_loss < best_val_loss - params["early_stopping_delta"]:
             best_val_loss = val_loss
@@ -276,6 +307,15 @@ def train_and_evaluate_classifier(train_loader, val_loader, test_loader, params,
     plt.title("Confusion Matrix")
     plt.show()
 
+
+print("Training SAE with Diagonal Targets...")
+sae_model_diag = SAE(input_size, 120, SAE_PARAMS).to(device)
+train_sae(sae_model_diag, train_loader, val_loader, diagonal_targets, SAE_PARAMS, lambda_reg=0.06)
+
+print("Training and Evaluating SAEClassifier on Diagonal Latent Representations...")
+train_and_evaluate_classifier(
+    train_loader, val_loader, test_loader, MLP_PARAMS, sae_model_diag.encoder, input_size, 120
+)
 
 print("Training SAE with Hypersphere Targets...")
 sae_model_hyper = SAE(input_size, 120, SAE_PARAMS).to(device)
