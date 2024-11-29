@@ -32,9 +32,9 @@ SAE_PARAMS = {
 }
 
 MLP_PARAMS = {
-    "layer_sizes": [256, 128],
+    "layer_sizes": [64, 32],
     "dropout_rates": [0.5, 0.5],
-    "learning_rate": 1e-3,
+    "learning_rate": 1e-4,
     "batch_size": 128,
     "num_epochs": 200,
     "early_stopping_patience": 8,
@@ -106,7 +106,7 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg):
     for epoch in range(params["num_epochs"]):
         # Training
         sae_model.train()
-        train_loss, train_correct, train_total, penalty = 0, 0, 0, 0
+        train_loss, penalty = 0, 0
 
         for batch_data, batch_labels in train_loader:
             batch_data, batch_labels = batch_data.to(device), batch_labels.to(device)
@@ -120,16 +120,13 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg):
 
             train_loss += loss.item()
             penalty += reg_penalty.item()
-            train_total += batch_labels.size(0)
-            train_correct += (torch.argmax(latent, dim=1) == batch_labels).sum().item()
 
         train_loss /= len(train_loader)
-        train_acc = train_correct / train_total
         penalty /= len(train_loader)
 
         # Validation
         sae_model.eval()
-        val_loss, val_correct, val_total = 0, 0, 0
+        val_loss = 0
 
         with torch.no_grad():
             for batch_data, batch_labels in val_loader:
@@ -140,13 +137,10 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg):
                 loss = mse_loss + lambda_reg * reg_penalty
 
                 val_loss += loss.item()
-                val_total += batch_labels.size(0)
 
         val_loss /= len(val_loader)
 
-        print(f"Epoch {epoch+1}/{params['num_epochs']} - "
-              f"Train Loss: {train_loss:.4f}, Penalty: {penalty:.4f}, "
-              f"Val Loss: {val_loss:.4f}")
+        print(f"Epoch {epoch+1}/{params['num_epochs']} - Train Loss: {train_loss:.4f}, Penalty: {penalty:.4f}, Val Loss: {val_loss:.4f}")
 
         # Early stopping
         if val_loss < best_val_loss - params["early_stopping_delta"]:
@@ -171,34 +165,40 @@ def extract_latent_representations(sae_model, data_loader):
             labels.append(batch_labels.cpu())
     return torch.cat(latent_representations), torch.cat(labels)
 
-# MLP Classifier
-class MLPClassifier(nn.Module):
-    def __init__(self, input_size, output_size, params):
-        super(MLPClassifier, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(input_size, params["layer_sizes"][0]),
-            nn.ReLU(),
-            nn.Dropout(params["dropout_rates"][0]),
-            nn.Linear(params["layer_sizes"][0], params["layer_sizes"][1]),
-            nn.ReLU(),
-            nn.Dropout(params["dropout_rates"][1]),
-            nn.Linear(params["layer_sizes"][1], output_size)
-        )
+class SAEClassifier(nn.Module):
+    def __init__(self, encoder, input_size, encoder_output_size, classifier_hidden_sizes, num_classes, leaky_relu_negative_slope=0.01, batch_norm=True):
+        super(SAEClassifier, self).__init__()
+        self.encoder = encoder  # Pre-trained encoder, frozen
+        for param in self.encoder.parameters():
+            param.requires_grad = False  # Freeze encoder weights
+        layers = []
+        prev_size = encoder_output_size
+        for hidden_size in classifier_hidden_sizes:
+            layers.append(nn.Linear(prev_size, hidden_size))
+            if batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_size))
+            layers.append(nn.LeakyReLU(negative_slope=leaky_relu_negative_slope))
+            prev_size = hidden_size
+        layers.append(nn.Linear(prev_size, num_classes))
+        self.classifier = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.fc(x)
+        x = self.encoder(x)  # Pass through the encoder to create latent space
+        x = self.classifier(x)  # Pass latent space through the classifier head
+        return x
 
-# Train and evaluate MLP
-def train_and_evaluate_classifier(latent_train, labels_train, latent_val, labels_val, latent_test, labels_test, params):
-    train_dataset = TensorDataset(latent_train, labels_train)
-    val_dataset = TensorDataset(latent_val, labels_val)
-    test_dataset = TensorDataset(latent_test, labels_test)
-    train_loader = get_data_loader(train_dataset, params["batch_size"])
-    val_loader = get_data_loader(val_dataset, params["batch_size"], shuffle=False)
-    test_loader = get_data_loader(test_dataset, params["batch_size"], shuffle=False)
+def train_and_evaluate_classifier(train_loader, val_loader, test_loader, params, encoder, input_size, encoder_output_size):
+    classifier = SAEClassifier(
+        encoder=encoder,
+        input_size=input_size,
+        encoder_output_size=encoder_output_size,
+        classifier_hidden_sizes=params["layer_sizes"],
+        num_classes=num_classes,
+        leaky_relu_negative_slope=0.01,
+        batch_norm=True
+    ).to(device)
 
-    classifier = MLPClassifier(latent_train.size(1), num_classes, params).to(device)
-    optimizer = optim.Adam(classifier.parameters(), lr=params["learning_rate"])
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, classifier.parameters()), lr=params["learning_rate"])
     criterion = nn.CrossEntropyLoss()
 
     best_val_loss = float("inf")
@@ -224,7 +224,6 @@ def train_and_evaluate_classifier(latent_train, labels_train, latent_val, labels
         train_loss /= len(train_loader)
         train_acc = train_correct / train_total
 
-        # Validation
         classifier.eval()
         val_loss, val_correct, val_total = 0, 0, 0
 
@@ -255,7 +254,6 @@ def train_and_evaluate_classifier(latent_train, labels_train, latent_val, labels
 
     classifier.load_state_dict(torch.load("best_classifier_model.pth"))
 
-    # Test evaluation
     classifier.eval()
     test_correct, test_total = 0, 0
     all_preds, all_labels = [], []
@@ -278,7 +276,7 @@ def train_and_evaluate_classifier(latent_train, labels_train, latent_val, labels
     plt.title("Confusion Matrix")
     plt.show()
 
-# Main script
+
 print("Training SAE with Hypersphere Targets...")
 sae_model_hyper = SAE(input_size, 120, SAE_PARAMS).to(device)
 train_sae(sae_model_hyper, train_loader, val_loader, hypersphere_targets, SAE_PARAMS, lambda_reg=0.06)
@@ -287,8 +285,10 @@ latent_train_hyper, labels_train_hyper = extract_latent_representations(sae_mode
 latent_val_hyper, labels_val_hyper = extract_latent_representations(sae_model_hyper, val_loader)
 latent_test_hyper, labels_test_hyper = extract_latent_representations(sae_model_hyper, test_loader)
 
-print("Training and Evaluating MLP on Hypersphere Latent Representations...")
-train_and_evaluate_classifier(latent_train_hyper, labels_train_hyper, latent_val_hyper, labels_val_hyper, latent_test_hyper, labels_test_hyper, MLP_PARAMS)
+print("Training and Evaluating SAEClassifier on Hypersphere Latent Representations...")
+train_and_evaluate_classifier(
+    train_loader, val_loader, test_loader, MLP_PARAMS, sae_model_hyper.encoder, input_size, 120
+)
 
 print("Training SAE with Direct Targets...")
 sae_model_direct = SAE(input_size, 10, SAE_PARAMS).to(device)
@@ -298,5 +298,7 @@ latent_train_direct, labels_train_direct = extract_latent_representations(sae_mo
 latent_val_direct, labels_val_direct = extract_latent_representations(sae_model_direct, val_loader)
 latent_test_direct, labels_test_direct = extract_latent_representations(sae_model_direct, test_loader)
 
-print("Training and Evaluating MLP on Direct Latent Representations...")
-train_and_evaluate_classifier(latent_train_direct, labels_train_direct, latent_val_direct, labels_val_direct, latent_test_direct, labels_test_direct, MLP_PARAMS)
+print("Training and Evaluating SAEClassifier on Direct Latent Representations...")
+train_and_evaluate_classifier(
+    train_loader, val_loader, test_loader, MLP_PARAMS, sae_model_direct.encoder, input_size, 10
+)
