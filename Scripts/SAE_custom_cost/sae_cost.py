@@ -103,13 +103,13 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg, 
     )
     best_val_loss = float("inf")
     early_stop_counter = 0
-    train_losses, val_losses = [], []
+    train_losses, val_losses, penalties = [], [], []
 
     start_time = time.time()
 
     for epoch in range(params["num_epochs"]):
         sae_model.train()
-        train_loss, penalty = 0, 0
+        train_loss, epoch_penalty = 0, 0
 
         for batch_data, batch_labels in train_loader:
             batch_data, batch_labels = batch_data.to(device), batch_labels.to(device)
@@ -121,11 +121,12 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg, 
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
-            penalty += reg_penalty.item()
+            epoch_penalty += reg_penalty.item() * batch_data.size(0)  # Weighted by batch size
 
-        train_loss /= len(train_loader)
-        penalty /= len(train_loader)
+        train_loss /= len(train_loader)  # Average over batches
+        epoch_penalty /= len(train_loader.dataset)  # Normalize penalty across the dataset
         train_losses.append(train_loss)
+        penalties.append(epoch_penalty)
 
         sae_model.eval()
         val_loss = 0
@@ -138,11 +139,11 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg, 
                 loss = mse_loss + lambda_reg * reg_penalty
                 val_loss += loss.item()
 
-        val_loss /= len(val_loader)
+        val_loss /= len(val_loader)  # Average validation loss
         val_losses.append(val_loss)
 
         scheduler.step(val_loss)
-        print(f"Epoch {epoch+1}/{params['num_epochs']} - Train Loss: {train_loss:.4f}, Penalty: {penalty:.4f}, Val Loss: {val_loss:.4f}")
+        print(f"Epoch {epoch+1}/{params['num_epochs']} - Train Loss: {train_loss:.4f}, Penalty: {epoch_penalty:.4f}, Val Loss: {val_loss:.4f}")
 
         if val_loss < best_val_loss - params["early_stopping_delta"]:
             best_val_loss = val_loss
@@ -154,22 +155,43 @@ def train_sae(sae_model, train_loader, val_loader, targets, params, lambda_reg, 
                 print("Early stopping triggered.")
                 break
 
+    # Save losses and penalties
     total_time = time.time() - start_time
+    print(f"Training completed in {total_time:.2f} seconds.")
+
     np.save(os.path.join(output_dir, "train_losses.npy"), train_losses)
     np.save(os.path.join(output_dir, "val_losses.npy"), val_losses)
+    np.save(os.path.join(output_dir, "penalties.npy"), penalties)
 
-    plt.figure()
-    plt.plot(train_losses, label="Train Loss")
-    plt.plot(val_losses, label="Validation Loss")
+    # 2D Plot: Train and Validation Loss
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss", color="blue")
+    plt.plot(range(1, len(val_losses) + 1), val_losses, label="Validation Loss", color="orange")
     plt.xlabel("Epochs")
     plt.ylabel("Loss")
     plt.title("SAE Training and Validation Loss")
     plt.legend()
-    plt.savefig(os.path.join(output_dir, "loss_curve.png"))
+    plt.grid()
+    plt.savefig(os.path.join(output_dir, "sae_loss_curve.png"))
     plt.close()
 
-    print(f"Training completed in {total_time:.2f} seconds.")
-    return penalty
+    # 3D Plot: Validation Loss and Penalty
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+
+    epochs = range(1, len(val_losses) + 1)
+
+    # Scatter plot for validation loss with penalty
+    sc = ax.scatter(epochs, val_losses, penalties, c=penalties, cmap='viridis', s=50)
+    ax.set_xlabel("Epochs")
+    ax.set_ylabel("Validation Loss")
+    ax.set_zlabel("Penalty")
+    ax.set_title("Validation Loss and Penalty over Epochs")
+    fig.colorbar(sc, ax=ax, label="Penalty")
+    plt.savefig(os.path.join(output_dir, "val_loss_penalty_curve.png"))
+    plt.close()
+
+    return penalties[-1], total_time  # Return final penalty and total time
 
 # SAE Classifier
 class SAEClassifier(nn.Module):
@@ -205,6 +227,7 @@ def train_and_evaluate_classifier(train_loader, val_loader, test_loader, params,
     early_stop_counter = 0
     train_losses, val_losses = [], []
 
+    start_time = time.time()
     for epoch in range(params["num_epochs"]):
         classifier.train()
         train_loss, train_correct, train_total = 0, 0, 0
@@ -253,6 +276,19 @@ def train_and_evaluate_classifier(train_loader, val_loader, test_loader, params,
                 print("Early stopping triggered.")
                 break
 
+    total_time = time.time() - start_time
+    print(f"Training completed in {total_time:.2f} seconds.")
+
+    plt.figure()
+    plt.plot(train_losses, label="Train Loss")
+    plt.plot(val_losses, label="Validation Loss")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.title("Classifier Training and Validation Loss")
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, "mlp_loss_curve.png"))
+    plt.close()
+
     # Evaluate on test set
     classifier.load_state_dict(torch.load(os.path.join(output_dir, "best_classifier_model.pth")))
     classifier.eval()
@@ -281,7 +317,7 @@ def train_and_evaluate_classifier(train_loader, val_loader, test_loader, params,
     plt.savefig(os.path.join(output_dir, "confusion_matrix.png"))
     plt.close()
 
-    return test_acc
+    return test_acc, total_time
 
 # Experiment loop with 3D visualization
 def experiment(target_type, lambda_reg, batch_size, freeze_encoder):
@@ -301,7 +337,7 @@ def experiment(target_type, lambda_reg, batch_size, freeze_encoder):
     os.makedirs(output_dir, exist_ok=True)
 
     sae_model = SAE(input_size, bottleneck_size, SAE_PARAMS).to(device)
-    final_penalty = train_sae(sae_model, train_loader, val_loader, targets, SAE_PARAMS, lambda_reg, output_dir)
+    final_penalty, sae_time = train_sae(sae_model, train_loader, val_loader, targets, SAE_PARAMS, lambda_reg, output_dir)
 
     classifier = SAEClassifier(
         encoder=sae_model.encoder,
@@ -312,12 +348,14 @@ def experiment(target_type, lambda_reg, batch_size, freeze_encoder):
         dropout_rate=MLP_PARAMS["dropout_rates"][0]
     ).to(device)
 
-    test_accuracy = train_and_evaluate_classifier(train_loader, val_loader, test_loader, MLP_PARAMS, classifier, output_dir)
+    test_accuracy, classifier_time = train_and_evaluate_classifier(train_loader, val_loader, test_loader, MLP_PARAMS, classifier, output_dir)
 
     with open(os.path.join(output_dir, "metrics.txt"), "w") as f:
         f.write(f"Lambda: {lambda_reg}\n")
         f.write(f"Penalty: {final_penalty}\n")
         f.write(f"Test Accuracy: {test_accuracy}\n")
+        f.write(f"SAE Training Time: {sae_time}\n")
+        f.write(f"Classifier Training Time: {classifier_time}\n")
 
     return lambda_reg, final_penalty, test_accuracy
 
