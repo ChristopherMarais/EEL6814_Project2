@@ -1,0 +1,5 @@
+Lambda: 0.08
+Penalty: 0.07263038829962412
+Test Accuracy: 0.9177
+SAE Training Time: 569.262856721878
+Classifier Training Time: 121.1334171295166

@@ -333,7 +333,7 @@ def experiment(target_type, lambda_reg, batch_size, freeze_encoder):
     target_func, bottleneck_size = TARGET_GENERATORS[target_type]
     targets = target_func(num_classes, bottleneck_size)
 
-    output_dir = f"results/{target_type}/lambda_{lambda_reg}_batch_{batch_size}_freeze_{freeze_encoder}"
+    output_dir = f"experiments/{target_type}/lambda_{lambda_reg}_batch_{batch_size}_freeze_{freeze_encoder}"
     os.makedirs(output_dir, exist_ok=True)
 
     sae_model = SAE(input_size, bottleneck_size, SAE_PARAMS).to(device)
@@ -359,10 +359,10 @@ def experiment(target_type, lambda_reg, batch_size, freeze_encoder):
 
     return lambda_reg, final_penalty, test_accuracy
 
-TARGET_TYPES = ["hypersphere", "diagonal", "direct"]
-LAMBDA_VALUES = [0.01, 0.06, 0.3, 1.5, 5]
-BATCH_SIZES = [128]
-FREEZE_ENCODER_OPTIONS = [True, False]
+TARGET_TYPES = ["hypersphere", "diagonal"]
+LAMBDA_VALUES = [0.08, 0.1]
+BATCH_SIZES = [512, 1024]
+FREEZE_ENCODER_OPTIONS = [True]
 
 results = []
 for target_type in TARGET_TYPES:
